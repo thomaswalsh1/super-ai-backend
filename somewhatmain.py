@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Union
 import uvicorn
 import logging
 from datetime import datetime
@@ -8,7 +8,6 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import platform
 import os
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,8 +27,12 @@ class EvaluationRequest(BaseModel):
     prompt: str
     responses: List[LLMResponse]
 
+class Ranking(BaseModel):
+    llm_name: str
+    score: float
+
 class EvaluationResult(BaseModel):
-    rankings: List[Dict[str, float]]
+    rankings: List[Ranking]
     reasoning: str
     evaluation_time: float
     criteria_scores: Dict[str, Dict[str, float]]
@@ -47,6 +50,10 @@ class LlamaEvaluator:
                 padding_side="left"
             )
             
+            # Set up padding token
+            logger.info("Setting up padding token")
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            
             logger.info(f"Loading model from {self.model_name}")
             if self.device == "mps":
                 self.model = AutoModelForCausalLM.from_pretrained(
@@ -62,6 +69,9 @@ class LlamaEvaluator:
                     device_map=None
                 )
                 self.model.to(self.device)
+            
+            # Ensure model knows about padding token
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
             
             logger.info(f"Successfully loaded Llama model on {self.device}")
             
@@ -89,24 +99,23 @@ class LlamaEvaluator:
             # Create evaluation prompt
             evaluation_prompt = self.create_evaluation_prompt(request)
             
-            # Fixed tokenization process
+            # Tokenize input
             encoded_input = self.tokenizer(
                 evaluation_prompt,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=2048  # Adjust based on your needs
+                max_length=2048
             )
             
             # Move input tensors to device
-            attention_mask = encoded_input['attention_mask'].to(self.device)
             input_ids = encoded_input['input_ids'].to(self.device)
-            
+            attention_mask = encoded_input['attention_mask'].to(self.device)
             
             if self.device == "mps":
                 torch.mps.empty_cache()
             
-            # Generate with proper input format
+            # Generate response
             outputs = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -132,6 +141,7 @@ class LlamaEvaluator:
             
             # Extract the response part after the instruction
             evaluation_text = evaluation_text.split('[/INST]')[-1].strip()
+            print(evaluation_text)
             
             if self.device == "mps":
                 torch.mps.empty_cache()
@@ -139,8 +149,12 @@ class LlamaEvaluator:
             parsed_evaluation = self._parse_evaluation(evaluation_text)
             evaluation_time = (datetime.now() - start_time).total_seconds()
             
+            # Create properly structured EvaluationResult
+            rankings = [Ranking(llm_name=r["llm_name"], score=r["score"]) 
+                       for r in parsed_evaluation["rankings"]]
+            
             return EvaluationResult(
-                rankings=parsed_evaluation["rankings"],
+                rankings=rankings,
                 reasoning=parsed_evaluation["reasoning"],
                 evaluation_time=evaluation_time,
                 criteria_scores=parsed_evaluation["criteria_scores"]
@@ -188,96 +202,102 @@ FINAL RANKING:
         return formatted
 
     def _parse_evaluation(self, eval_text: str) -> Dict:
+
         try:
-            # Split the evaluation into sections
+            # Initialize default structure
+            result = {
+                "criteria_scores": {},
+                "reasoning": "No reasoning provided",
+                "rankings": [],
+                "final_response" : eval_text
+            }
+        
+            # Split into sections, handling missing sections gracefully
             sections = eval_text.split('\n\n')
+        
+            # Parse scores section
+            scores_section = None
+            for section in sections:
+                if section.strip().startswith('SCORES:'):
+                    scores_section = section
+                    break
+                
+            if scores_section:
+                current_llm = None
+                scores = {}
             
-            # Parse scores
-            scores_section = next(s for s in sections if s.startswith('SCORES:'))
-            scores = {}
-            current_llm = None
-            
-            for line in scores_section.split('\n'):
-                if ':' in line:
-                    if 'SCORES:' not in line:
-                        if '-' not in line:
+                for line in scores_section.split('\n'):
+                    line = line.strip()
+                    if not line or line == 'SCORES:':
+                        continue
+                    
+                    if ':' in line:
+                        if '-' not in line:  # This is an LLM name
                             current_llm = line.replace(':', '').strip()
-                            scores[current_llm] = {}
-                        else:
-                            criterion, score = line.split(':')
-                            criterion = criterion.replace('-', '').strip()
-                            score = float(score.strip())
-                            scores[current_llm][criterion.lower()] = score
-
-            # Extract reasoning
-            reasoning_section = next(s for s in sections if s.startswith('REASONING:'))
-            reasoning = reasoning_section.replace('REASONING:', '').strip()
-
+                            scores[current_llm] = {
+                                'relevance': 0.0,
+                                'accuracy': 0.0,
+                                'coherence': 0.0,
+                                'completeness': 0.0
+                            }
+                        elif current_llm:  # This is a criterion score
+                            try:
+                                criterion, score = [x.strip() for x in line.split(':')]
+                                criterion = criterion.replace('-', '').lower()
+                                # Handle any non-numeric scores gracefully
+                                try:
+                                    score = float(score)
+                                except ValueError:
+                                    score = 0.0
+                                scores[current_llm][criterion] = score
+                            except Exception as e:
+                                logger.warning(f"Failed to parse score line '{line}': {str(e)}")
+                                continue
+            
+                result["criteria_scores"] = scores
+        
+            # Parse reasoning section
+            reasoning_section = None
+            for section in sections:
+                if section.strip().startswith('REASONING:'):
+                    reasoning_section = section
+                    break
+                
+            if reasoning_section:
+                result["reasoning"] = reasoning_section.replace('REASONING:', '').strip()
+        
             # Calculate rankings
             rankings = []
-            for llm_name, llm_scores in scores.items():
-                avg_score = sum(llm_scores.values()) / len(llm_scores)
-                rankings.append({"llm_name": llm_name, "score": avg_score})
-            
+            for llm_name, llm_scores in result["criteria_scores"].items():
+                try:
+                    # Calculate average score, defaulting to 0.0 if there's an issue
+                    scores_list = [score for score in llm_scores.values() if isinstance(score, (int, float))]
+                    avg_score = sum(scores_list) / len(scores_list) if scores_list else 0.0
+                    rankings.append({
+                        "llm_name": llm_name,
+                        "score": round(float(avg_score), 2)
+                    })
+                except Exception as e:
+                    logger.error(f"Error calculating average for {llm_name}: {str(e)}")
+                    rankings.append({
+                        "llm_name": llm_name,
+                        "score": 0.0
+                    })
+        
+            # Sort rankings by score in descending order
             rankings.sort(key=lambda x: x["score"], reverse=True)
-
-            return {
-                "criteria_scores": scores,
-                "reasoning": reasoning,
-                "rankings": rankings
-            }
+            result["rankings"] = rankings
+        
+            return result
+        
         except Exception as e:
             logger.error(f"Error parsing evaluation: {str(e)}")
-            raise ValueError(f"Failed to parse evaluation output: {str(e)}")
-
-    @torch.no_grad()
-    async def evaluate_responses(self, request: EvaluationRequest) -> EvaluationResult:
-        """Evaluate and rank the LLM responses using Llama"""
-        start_time = datetime.now()
-        
-        try:
-            evaluation_prompt = self.create_evaluation_prompt(request)
-            
-            # Modified tokenization and generation process
-            inputs = self.tokenizer(evaluation_prompt, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            
-            if self.device == "mps":
-                torch.mps.empty_cache()
-            
-            outputs = self.model.generate(
-                inputs.input_ids,
-                max_new_tokens=1024,
-                temperature=0.7,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                do_sample=True,
-                num_return_sequences=1,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-            
-            # Move output to CPU for decoding
-            outputs = outputs.cpu()
-            
-            evaluation_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            evaluation_text = evaluation_text.split('[/INST]')[-1].strip()
-            
-            if self.device == "mps":
-                torch.mps.empty_cache()
-            
-            parsed_evaluation = self._parse_evaluation(evaluation_text)
-            evaluation_time = (datetime.now() - start_time).total_seconds()
-            
-            return EvaluationResult(
-                rankings=parsed_evaluation["rankings"],
-                reasoning=parsed_evaluation["reasoning"],
-                evaluation_time=evaluation_time,
-                criteria_scores=parsed_evaluation["criteria_scores"]
-            )
-            
-        except Exception as e:
-            logger.error(f"Error during evaluation: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            # Return a valid structure even in case of error
+            return {
+                "criteria_scores": {},
+                "reasoning": f"Error parsing evaluation: {str(e)}",
+                "rankings": []
+            }
 
 llama_evaluator = LlamaEvaluator()
 

@@ -10,7 +10,7 @@ device = "mps" if torch.backends.mps.is_available() else "cpu"
 model = model.to(device).half()  # Using FP16 for memory efficiency
 
 # Prepare input
-input_text = "Once upon a time,"
+input_text = "Who is kunal?"
 inputs = tokenizer(input_text, return_tensors="pt").to(device)
 
 # Generate output (change parameters if needed)
