@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from schema import *
 
 app = FastAPI()
 
@@ -8,5 +9,8 @@ async def root():
     return {"message": "Hello World"}
 
 @app.post("/compare")
-async def compare_responses():
-    return {"message": "Comparing..."}
+async def compare_responses(input: CompareRequest) -> CompareResponse:
+    print(input.a, input.b, input.c)
+    return {
+        "result": "Comparing..."
+    }
