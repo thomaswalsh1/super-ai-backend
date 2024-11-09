@@ -8,6 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import platform
 import os
+import re
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,6 +91,7 @@ class LlamaEvaluator:
         
         os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
+
     @torch.no_grad()
     async def evaluate_responses(self, request: EvaluationRequest) -> EvaluationResult:
         """Evaluate and rank the LLM responses using Llama"""
@@ -141,7 +143,6 @@ class LlamaEvaluator:
             
             # Extract the response part after the instruction
             evaluation_text = evaluation_text.split('[/INST]')[-1].strip()
-            print(evaluation_text)
             
             if self.device == "mps":
                 torch.mps.empty_cache()
@@ -165,34 +166,140 @@ class LlamaEvaluator:
             logger.error(f"Exception details: {str(e.__class__.__name__)}")
             raise HTTPException(status_code=500, detail=str(e))
 
+
+    @torch.no_grad()
+    def _parse_evaluation(self, eval_text: str) -> Dict:
+        """
+        Parse the evaluation text from LLM response into structured format.
+        """
+        try:
+            # Initialize result structure
+            result = {
+                "criteria_scores": {},
+                "reasoning": "",
+                "rankings": []
+            }
+        
+            # Split by LLM responses using "**" as delimiter
+            llm_sections = eval_text.split("**")
+        
+            # Parse scores and reasoning for each LLM
+            for section in llm_sections:
+                if "SCORES:" in section and "Response" in section:
+                    # Extract LLM name
+                    llm_name = section.split("Response")[0].strip()
+                
+                    # Initialize scores dict for this LLM
+                    scores = {}
+                
+                    # Find scores section
+                    scores_text = section.split("SCORES:")[1].split("REASONING:")[0]
+                
+                    # Parse individual scores
+                    for line in scores_text.split("\n"):
+                        if ":" in line and "-" in line:
+                            criterion = line.split(":")[0].replace("-", "").strip().lower()
+                            try:
+                                score = float(line.split(":")[1].strip())
+                                scores[criterion] = score
+                            except ValueError:
+                                scores[criterion] = 0.0
+                
+                    result["criteria_scores"][llm_name] = scores
+                
+                    # Extract reasoning if present
+                    if "REASONING:" in section:
+                        reasoning = section.split("REASONING:")[1].split("SCORES:", 1)[0].strip()
+                        if reasoning:
+                            if result["reasoning"]:
+                                result["reasoning"] += "\n\n"
+                            result["reasoning"] += f"{llm_name} Reasoning: {reasoning}"
+        
+            # Parse final ranking section
+            if "FINAL RANKING:" in eval_text:
+                ranking_section = eval_text.split("FINAL RANKING:")[1].split("Note")[0]
+                for line in ranking_section.split("\n"):
+                    if ":" in line and "." in line:
+                        try:
+                            llm_name = line.split(".")[1].split(":")[0].strip()
+                            score = float(line.split(":")[1].strip())
+                            result["rankings"].append({
+                                "llm_name": llm_name,
+                                "score": score
+                            })
+                        except (ValueError, IndexError):
+                            continue
+        
+            # If no rankings were found, calculate them from scores
+            if not result["rankings"]:
+                for llm_name, scores in result["criteria_scores"].items():
+                    if scores:
+                        avg_score = sum(scores.values()) / len(scores)
+                        result["rankings"].append({
+                            "llm_name": llm_name,
+                            "score": round(float(avg_score), 2)
+                        })
+                # Sort rankings by score in descending order
+                result["rankings"].sort(key=lambda x: x["score"], reverse=True)
+        
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error parsing evaluation: {str(e)}")
+            return {
+                "criteria_scores": {},
+                "reasoning": f"Error parsing evaluation: {str(e)}",
+                "rankings": []
+            }
+
     def create_evaluation_prompt(self, request: EvaluationRequest) -> str:
-        """Create a structured prompt optimized for Llama's instruction format"""
-        prompt = f"""[INST] You are an expert at evaluating language model outputs. 
-Please evaluate the following responses to this prompt: "{request.prompt}"
+        """Create a strictly formatted prompt that enforces structure"""
+    
+        # Format responses with clear numbering
+        responses_text = ""
+        for idx, resp in enumerate(request.responses, 1):
+            responses_text += f"\nResponse {idx}. {resp.llm_name}:\n{resp.response}\n"
+    
+        prompt = f"""[INST] Evaluate these {len(request.responses)} language model responses to the prompt: "{request.prompt}"
 
-{self._format_responses(request.responses)}
+    {responses_text}
 
-Evaluate each response on these criteria:
-1. Relevance (0-10)
-2. Accuracy (0-10)
-3. Coherence (0-10)
-4. Completeness (0-10)
+    You MUST follow this EXACT format in your response:
 
-Provide your evaluation in this exact format:
-SCORES:
-<llm_name>:
-- Relevance: <score>
-- Accuracy: <score>
-- Coherence: <score>
-- Completeness: <score>
+    EVALUATION FOR {request.responses[0].llm_name}:
+    SCORES:
+    - Relevance: (0-10)
+    - Accuracy: (0-10)
+    - Coherence: (0-10)
+    - Completeness: (0-10)
+    REASONING: (2-3 sentences explaining these scores)
 
-REASONING:
-<your detailed reasoning for the scores>
+    EVALUATION FOR {request.responses[1].llm_name}:
+    SCORES:
+    - Relevance: (0-10)
+    - Accuracy: (0-10)
+    - Coherence: (0-10)
+    - Completeness: (0-10)
+    REASONING: (2-3 sentences explaining these scores)
 
-FINAL RANKING:
-1. <llm_name>: <average_score>
-2. <llm_name>: <average_score>
-... [/INST]"""
+    [Continue same format for each response]
+
+    FINAL RANKING:
+    1. [Model Name]: [Average Score]
+    2. [Model Name]: [Average Score]
+    3. [Model Name]: [Average Score]
+    4. [Model Name]: [Average Score]
+    5. [Model Name]: [Average Score]
+
+    Rules:
+    1. You must evaluate EVERY response
+    2. All scores must be numbers between 0 and 10
+    3. You must provide reasoning for each response
+    4. You must include a final ranking of ALL responses
+    5. Use EXACT headings: "EVALUATION FOR", "SCORES:", "REASONING:", "FINAL RANKING:"
+    6. Calculate average scores as (Relevance + Accuracy + Coherence + Completeness) / 4
+
+    Begin your evaluation now, following the exact format above. [/INST]"""
         return prompt
 
     def _format_responses(self, responses: List[LLMResponse]) -> str:
@@ -202,107 +309,92 @@ FINAL RANKING:
         return formatted
 
     def _parse_evaluation(self, eval_text: str) -> Dict:
-
+        """Parse evaluation text with strict format checking"""
         try:
-            # Initialize default structure
             result = {
                 "criteria_scores": {},
-                "reasoning": "No reasoning provided",
-                "rankings": [],
-                "final_response" : eval_text
-            }
-        
-            # Split into sections, handling missing sections gracefully
-            sections = eval_text.split('\n\n')
-        
-            # Parse scores section
-            scores_section = None
-            for section in sections:
-                if section.strip().startswith('SCORES:'):
-                    scores_section = section
-                    break
-                
-            if scores_section:
-                current_llm = None
-                scores = {}
-            
-                for line in scores_section.split('\n'):
-                    line = line.strip()
-                    if not line or line == 'SCORES:':
-                        continue
-                    
-                    if ':' in line:
-                        if '-' not in line:  # This is an LLM name
-                            current_llm = line.replace(':', '').strip()
-                            scores[current_llm] = {
-                                'relevance': 0.0,
-                                'accuracy': 0.0,
-                                'coherence': 0.0,
-                                'completeness': 0.0
-                            }
-                        elif current_llm:  # This is a criterion score
-                            try:
-                                criterion, score = [x.strip() for x in line.split(':')]
-                                criterion = criterion.replace('-', '').lower()
-                                # Handle any non-numeric scores gracefully
-                                try:
-                                    score = float(score)
-                                except ValueError:
-                                    score = 0.0
-                                scores[current_llm][criterion] = score
-                            except Exception as e:
-                                logger.warning(f"Failed to parse score line '{line}': {str(e)}")
-                                continue
-            
-                result["criteria_scores"] = scores
-        
-            # Parse reasoning section
-            reasoning_section = None
-            for section in sections:
-                if section.strip().startswith('REASONING:'):
-                    reasoning_section = section
-                    break
-                
-            if reasoning_section:
-                result["reasoning"] = reasoning_section.replace('REASONING:', '').strip()
-        
-            # Calculate rankings
-            rankings = []
-            for llm_name, llm_scores in result["criteria_scores"].items():
-                try:
-                    # Calculate average score, defaulting to 0.0 if there's an issue
-                    scores_list = [score for score in llm_scores.values() if isinstance(score, (int, float))]
-                    avg_score = sum(scores_list) / len(scores_list) if scores_list else 0.0
-                    rankings.append({
-                        "llm_name": llm_name,
-                        "score": round(float(avg_score), 2)
-                    })
-                except Exception as e:
-                    logger.error(f"Error calculating average for {llm_name}: {str(e)}")
-                    rankings.append({
-                        "llm_name": llm_name,
-                        "score": 0.0
-                    })
-        
-            # Sort rankings by score in descending order
-            rankings.sort(key=lambda x: x["score"], reverse=True)
-            result["rankings"] = rankings
-        
-            return result
-        
-        except Exception as e:
-            logger.error(f"Error parsing evaluation: {str(e)}")
-            # Return a valid structure even in case of error
-            return {
-                "criteria_scores": {},
-                "reasoning": f"Error parsing evaluation: {str(e)}",
+                "reasoning": "",
                 "rankings": []
             }
+            
+            # Split into individual evaluations
+            evaluations = eval_text.split("EVALUATION FOR")
+            all_reasoning = []
+            
+            # Process each evaluation section
+            for eval_section in evaluations[1:]:  # Skip first empty split
+                try:
+                    # Extract LLM name
+                    llm_name = eval_section.split(":")[0].strip()
+                    
+                    # Extract scores
+                    if "SCORES:" in eval_section:
+                        scores_section = eval_section.split("SCORES:")[1].split("REASONING:")[0]
+                        scores = {}
+                        
+                        for line in scores_section.split("\n"):
+                            if "-" in line and ":" in line:
+                                criterion = line.split(":")[0].replace("-", "").strip().lower()
+                                try:
+                                    score = float(line.split(":")[1].strip())
+                                    scores[criterion] = score
+                                except ValueError:
+                                    scores[criterion] = 0.0
+                        
+                        result["criteria_scores"][llm_name] = scores
+                    
+                    # Extract reasoning
+                    if "REASONING:" in eval_section:
+                        reasoning = eval_section.split("REASONING:")[1].split("EVALUATION FOR")[0]
+                        reasoning = reasoning.split("FINAL RANKING:")[0].strip()
+                        all_reasoning.append(f"{llm_name}: {reasoning}")
+                
+                except Exception as e:
+                    logger.error(f"Error processing evaluation section: {str(e)}")
+                    continue
+            
+            # Combine all reasoning
+            result["reasoning"] = "\n\n".join(all_reasoning)
+            
+            # Extract final ranking
+            if "FINAL RANKING:" in eval_text:
+                ranking_section = eval_text.split("FINAL RANKING:")[1].strip()
+                for line in ranking_section.split("\n"):
+                    if ":" in line and any(char.isdigit() for char in line):
+                        try:
+                            # Remove number prefix and split by colon
+                            line = re.sub(r'^\d+\.\s*', '', line)
+                            llm_name, score = line.split(":")
+                            result["rankings"].append({
+                                "llm_name": llm_name.strip(),
+                                "score": float(score.strip())
+                            })
+                        except (ValueError, IndexError) as e:
+                            logger.error(f"Error parsing ranking line '{line}': {str(e)}")
+                            continue
+            
+            # If no rankings found, calculate from scores
+            if not result["rankings"] and result["criteria_scores"]:
+                for llm_name, scores in result["criteria_scores"].items():
+                    if scores:
+                        avg_score = sum(scores.values()) / len(scores)
+                        result["rankings"].append({
+                            "llm_name": llm_name,
+                            "score": round(float(avg_score), 2)
+                        })
+                # Sort by score descending
+                result["rankings"].sort(key=lambda x: x["score"], reverse=True)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error parsing evaluation: {str(e)}")
+            raise ValueError(f"Failed to parse evaluation output: {str(e)}")
 
 llama_evaluator = LlamaEvaluator()
 
 @app.post("/evaluate", response_model=EvaluationResult)
-async def evaluate_llm_responses(request: EvaluationRequest):
+async def evaluate_responses(request: EvaluationRequest):
     """Endpoint to evaluate and rank LLM responses"""
     logger.info(f"Received evaluation request for prompt: {request.prompt[:100]}...")
     return await llama_evaluator.evaluate_responses(request)
