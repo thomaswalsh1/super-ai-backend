@@ -1,1 +1,7 @@
 fastapi[standard]==0.115.4
+pydantic==1.10.8
+uvicorn==0.22.0
+torch==2.0.1
+transformers==4.34.0
+logging==0.5.1.2  
+fastapi-cors-middleware==0.0.10 

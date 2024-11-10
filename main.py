@@ -9,6 +9,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import platform
 import os
 import re
+from fastapi.middleware.cors import CORSMiddleware
+
+origins = ["*"]
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,6 +21,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Llama-based LLM response Evaluator")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class LLMResponse(BaseModel):
     llm_name: str
