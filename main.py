@@ -46,7 +46,7 @@ class EvaluationRequest(BaseModel):
 class Ranking(BaseModel):
     llm_name: str
     score: float
-    criteria_scores: Dict[str, float]
+    scores: Dict[str, float]
     reasoning: str
 
 class EvaluationResult(BaseModel):
@@ -102,7 +102,7 @@ class LlamaEvaluator:
             logger.info(f"Scores: {scores}")
             reasoning = section.split("REASONING:")[1].strip()
             logger.info(f"Reasoning: {reasoning}")
-            rankings.append(Ranking(llm_name=llm_name, score=sum(scores.values()) / len(scores), criteria_scores=scores, reasoning=reasoning))
+            rankings.append(Ranking(llm_name=llm_name, score=sum(scores.values()) / len(scores), scores=scores, reasoning=reasoning))
         logger.info(f"Rankings: {rankings}")
         return rankings
 
