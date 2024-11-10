@@ -55,7 +55,7 @@ class EvaluationResult(BaseModel):
 
 class LlamaEvaluator:
     def __init__(self):
-        self.openai_api_key = "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"
+        self.openai_api_key =  os.getenv("OPENAI_API_KEY")
         if not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
         self.model_name = "meta/llama-3.1-405b-instruct"
