@@ -1,5 +1,5 @@
 import torch
-from transformers import LlamaForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, LlamaForCausalLM
 
 # Load model and tokenizer (ensure path_to_llama_model points to your downloaded model path)
 model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")

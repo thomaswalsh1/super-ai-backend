@@ -1,13 +1,14 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Dict
 import logging
-from datetime import datetime
 import os
-from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime
+from typing import Dict, List
+
 import uvicorn
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from pydantic import BaseModel
 
 load_dotenv()
 

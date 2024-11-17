@@ -1,14 +1,15 @@
+import logging
+import os
+import platform
+import re
+from datetime import datetime
+from typing import Dict, List
+
+import torch
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Union
-import uvicorn
-import logging
-from datetime import datetime
-import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import platform
-import os
-import re
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
