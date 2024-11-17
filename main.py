@@ -14,8 +14,7 @@ load_dotenv()
 origins = ["*"]
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -30,18 +29,20 @@ app.add_middleware(
 )
 
 client = OpenAI(
-  base_url = "https://integrate.api.nvidia.com/v1",
-  api_key = os.getenv("OPENAI_API_KEY")
+    base_url="https://integrate.api.nvidia.com/v1", api_key=os.getenv("OPENAI_API_KEY")
 )
+
 
 class LLMResponse(BaseModel):
     llm_name: str
     response: str
     metadata: Dict = {}
 
+
 class EvaluationRequest(BaseModel):
     prompt: str
     responses: List[LLMResponse]
+
 
 class Ranking(BaseModel):
     llm_name: str
@@ -49,13 +50,15 @@ class Ranking(BaseModel):
     scores: Dict[str, float]
     reasoning: str
 
+
 class EvaluationResult(BaseModel):
     rankings: List[Ranking]
     evaluation_time: float
 
+
 class LlamaEvaluator:
     def __init__(self):
-        self.openai_api_key =  os.getenv("OPENAI_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
         self.model_name = "meta/llama-3.1-405b-instruct"
@@ -66,18 +69,20 @@ class LlamaEvaluator:
             evaluation_prompt = self.create_evaluation_prompt(request)
             response = client.chat.completions.create(
                 model="meta/llama-3.1-405b-instruct",
-                messages=[{"role":"user","content":evaluation_prompt}],
+                messages=[{"role": "user", "content": evaluation_prompt}],
                 max_tokens=4096,
                 temperature=0.7,
                 top_p=0.9,
-                stop=["[/INST]"]
+                stop=["[/INST]"],
             )
             evaluation_text = response.choices[0].message.content
             print(evaluation_text)
-            evaluation_text = evaluation_text.split('[/INST]')[-1].strip()
+            evaluation_text = evaluation_text.split("[/INST]")[-1].strip()
             parsed_evaluation = self._parse_evaluation(evaluation_text)
             evaluation_time = (datetime.now() - start_time).total_seconds()
-            return EvaluationResult(rankings=parsed_evaluation, evaluation_time=evaluation_time)
+            return EvaluationResult(
+                rankings=parsed_evaluation, evaluation_time=evaluation_time
+            )
         except Exception as e:
             logger.error(f"Error during evaluation: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -102,7 +107,14 @@ class LlamaEvaluator:
             logger.info(f"Scores: {scores}")
             reasoning = section.split("REASONING:")[1].strip()
             logger.info(f"Reasoning: {reasoning}")
-            rankings.append(Ranking(llm_name=llm_name, score=sum(scores.values()) / len(scores), scores=scores, reasoning=reasoning))
+            rankings.append(
+                Ranking(
+                    llm_name=llm_name,
+                    score=sum(scores.values()) / len(scores),
+                    scores=scores,
+                    reasoning=reasoning,
+                )
+            )
         logger.info(f"Rankings: {rankings}")
         return rankings
 
@@ -142,18 +154,21 @@ class LlamaEvaluator:
 
 llama_evaluator = LlamaEvaluator()
 
+
 @app.post("/evaluate", response_model=EvaluationResult)
 async def evaluate_responses(request: EvaluationRequest):
     logger.info(f"Received evaluation request for prompt: {request.prompt[:100]}...")
     return await llama_evaluator.evaluate_responses(request)
+
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
         "model": "nvidia/llama",
-        "openai_api_key": "set" if os.environ.get("OPENAI_API_KEY") else "not set"
+        "openai_api_key": "set" if os.environ.get("OPENAI_API_KEY") else "not set",
     }
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

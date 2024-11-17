@@ -15,12 +15,7 @@ inputs = tokenizer(input_text, return_tensors="pt").to(device)
 
 # Generate output (change parameters if needed)
 with torch.no_grad():
-    outputs = model.generate(
-        **inputs,
-        max_length=50,
-        do_sample=True,
-        temperature=0.7
-    )
+    outputs = model.generate(**inputs, max_length=50, do_sample=True, temperature=0.7)
 
 # Decode output
 output_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
